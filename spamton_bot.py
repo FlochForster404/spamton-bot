@@ -1,53 +1,26 @@
 from telegram.ext import Updater, MessageHandler, Filters, CommandHandler
 import os, random, re
 
-# =========================
-# Tunable settings (safe defaults for "reply properly")
-# =========================
-GLITCH_PROB = 0.15        # 15% of words get glitched (keep most words)
+# ------------------- TUNING KNOBS -------------------
+GLITCH_PROB = 0.12        # % of words to glitch in the final reply (light seasoning)
 CAPS_INTENSITY = 0.55     # random caps strength
-BURST_PROB = 0.20         # 20% of the time a glitch inserts 2 items instead of 1
-MAX_GLITCH_FRACTION = 0.30  # never replace more than 30% of the words
+BURST_PROB = 0.15         # chance a glitch becomes a 2-item burst
+# ----------------------------------------------------
 
-# ====== Word banks for auto-generation ======
-ADJECTIVES = [
-    "BIG","LIMITED","FREE","HOT","VALUE","GUARANTEED","ONCE-IN-A-LIFETIME",
-    "PREMIUM","RISK-FREE","SECRET","MEGA","ULTIMATE","SPECIAL","TRUSTED",
-    "HYPERLINK","EXCLUSIVE","DISCOUNTED","EXTRA","CHEAP","BONUS","VIP",
-    "PLATINUM","GOLD","CERTIFIED","OFFICIAL"
-]
+# ==== Spamton-style word banks for post-processing ====
+ADJECTIVES = ["BIG","LIMITED","FREE","HOT","VALUE","GUARANTEED","MEGA","ULTIMATE","SECRET","TRUSTED"]
+NOUNS      = ["DEAL","CUSTOMER","OFFER","SALE","MONEY","BONUS","DISCOUNT","JACKPOT","SAVINGS","COUPON","ACCESS"]
+TECH       = ["HYPERLINK BLOCKED","404 ERROR","SYSTEM32","ACCESS DENIED","FILE NOT FOUND","BLUE SCREEN","LOGIN FAILED"]
+MEMES      = ["CONGRATULATIONS WINNER!","WE ARE SO BACK","COOKED","BASED","YOU CALLED??","MONEY MONEY MONEY","NO REFUNDS","LOW PRICE","ACT FAST"]
 
-NOUNS = [
-    "DEAL","CUSTOMER","OFFER","SALE","MONEY","BONUS","DISCOUNT","LOTTERY",
-    "JACKPOT","SAVINGS","CASH","NFT","PRIZE","SUBSCRIPTION","MEMBERSHIP",
-    "LOAN","CLICK","DOWNLOAD","SHIPPING","REFUND","WARRANTY","COUPON",
-    "VOUCHER","TRIAL","UPGRADE","ACCESS"
-]
-
-TECH = [
-    "HYPERLINK BLOCKED","404 ERROR","SYSTEM32","ACCESS DENIED","FILE NOT FOUND",
-    "BLUE SCREEN","MISSING DLL","LOGIN FAILED","UNREGISTERED VERSION",
-    "BUFFER OVERFLOW","OUT OF RANGE","SIGNAL LOST","DISK ERROR","EXPIRED LICENSE",
-    "CONNECTION RESET","TIMEOUT","FIREWALL DETECTED","PASSWORD REQUIRED"
-]
-
-MEMES = [
-    "HOT SINGLE IN YOUR AREA","CONGRATULATIONS WINNER!","WE ARE SO BACK","COOKED",
-    "BASED","YOU CALLED??","CHA-CHING!","MONEY MONEY MONEY","VOID IF REMOVED",
-    "TERMS AND CONDITIONS APPLY","BATTERY NOT INCLUDED","AS SEEN ON TV",
-    "CLICK HERE","BUY NOW","TRY NOW","NO REFUNDS","FREE SHIPPING","LOW PRICE","ACT FAST"
-]
-
-SUFFIXES = [
+SUFFIXES   = [
     "!!!",
     "??!?!!",
     "!! Do YoU WaNNa Be A [BIG SHOT]??",
     "!!?? (pLeAse... bUy sOmEtHinG...)",
-    "!!! [HYPERLINK BLOCKED]",
     "!! [LIMITED TIME OFFER]",
 ]
 
-# ====== Helpers / Generators ======
 def random_caps(s, p=CAPS_INTENSITY):
     out = []
     for c in s:
@@ -58,81 +31,91 @@ def random_caps(s, p=CAPS_INTENSITY):
     return "".join(out)
 
 def generate_glitch():
-    """Return one glitch like [BIG DEAL] or [BLUE SCREEN]."""
-    # 45% chance to create a 2–3 piece combo like [BIG DEAL BLUE SCREEN]
+    # 45%: two-part combo like [BIG DEAL]; 55%: single token
     if random.random() < 0.45:
         parts = [random.choice(ADJECTIVES), random.choice(NOUNS)]
-        if random.random() < 0.35:
+        if random.random() < 0.30:
             parts.append(random.choice(TECH + MEMES))
         phrase = " ".join(parts)
     else:
-        # pick a single category word
         phrase = random.choice(random.choice([ADJECTIVES, NOUNS, TECH, MEMES]))
     return f"[{phrase}]"
 
-def generate_glitch_burst():
-    """Return 1 or 2 glitches (bursts rarer so replies stay readable)."""
-    k = 2 if random.random() < BURST_PROB else 1
-    return " ".join(generate_glitch() for _ in range(k))
+def maybe_glitch_token():
+    # 1 or 2 glitches (burst rarer so reply stays readable)
+    if random.random() < BURST_PROB:
+        return generate_glitch() + " " + generate_glitch()
+    return generate_glitch()
 
-# ====== Core Spamtonify (keeps your sentence readable) ======
-def spamtonify(text, glitch=GLITCH_PROB, caps=CAPS_INTENSITY):
-    words = text.split()
-    n = len(words)
-    if n == 0:
-        return random_caps("HELLO") + " " + random_caps(random.choice(SUFFIXES), 0.65)
-
-    # Never replace first/last word; keep structure recognizable
-    keep_indices = {0, n - 1}
-
-    # Hard cap on how many words we’re allowed to replace
-    max_replace = max(1, int(n * MAX_GLITCH_FRACTION))
-    replaced = 0
-
-    out_tokens = []
-    for i, w in enumerate(words):
-        # Decide if we should glitch this word
-        should_glitch = (
-            (i not in keep_indices) and
-            (random.random() < glitch) and
-            (replaced < max_replace)
-        )
-        if should_glitch:
-            out_tokens.append(generate_glitch_burst())
-            replaced += 1
+def spamton_style(text: str) -> str:
+    """Take a clean model reply and add Spamton flavor (caps + bracket glitches)."""
+    tokens = text.split()
+    out = []
+    for w in tokens:
+        if random.random() < GLITCH_PROB and len(w) > 2:
+            out.append(maybe_glitch_token())
         else:
-            # 15%: bracketize the real word for flavor, else just random-caps it
-            if random.random() < 0.15:
+            # 12%: bracketize the original word, else random-caps
+            if random.random() < 0.12:
                 core = re.sub(r"^\W+|\W+$", "", w).upper()
-                if core:
-                    w = w.replace(core, f"[{core}]")
-            out_tokens.append(random_caps(w, caps))
+                w = w.replace(core, f"[{core}]") if core else w
+            out.append(random_caps(w))
+    # Add a dramatic suffix sometimes
+    if random.random() < 0.6:
+        out.append(random_caps(random.choice(SUFFIXES), 0.65))
+    return " ".join(out)
 
-    suffix = " " + random_caps(random.choice(SUFFIXES), 0.65)
-    return " ".join(out_tokens) + suffix
+# ===================== LLM "BRAIN" =====================
+# Using OpenAI Responses API (recommended) — reads OPENAI_API_KEY from env.
+# Docs: https://platform.openai.com/docs/guides/text  (Python examples) 
+from openai import OpenAI
+_client = OpenAI()  # will auto-read OPENAI_API_KEY if set
 
-# ====== Telegram Handlers ======
+SYSTEM_PROMPT = (
+    "You are Spamton from Deltarune. Answer the user's message helpfully and directly, "
+    "but in Spamton's persona: pushy late-night infomercial salesman, desperate, a bit glitchy. "
+    "Keep answers brief (1–3 sentences). Do NOT overuse brackets; the app will add style later."
+)
+
+def spamton_brain(user_text: str) -> str:
+    # Responses API: generate clean content; we'll style it ourselves.
+    # See docs recommending Responses API over older Chat Completions. 
+    resp = _client.responses.create(
+        model="gpt-5-mini",  # fast & cheap; you can swap to another supported model
+        input=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_text}
+        ],
+        max_output_tokens=180,
+        temperature=0.7,
+    )
+    # Python SDK exposes a convenience: output_text holds the concatenated text.
+    return resp.output_text or "I cannot compute that [DEAL] right now."
+
+# =================== TELEGRAM HANDLERS ===================
 def start_cmd(update, ctx):
-    update.message.reply_text("MENTION ME IN GROUPS, [CUSTOMER]!! I’ll keep your words & add a sweet [DEAL]!!")
+    update.message.reply_text("MENTION ME IN GROUPS, [CUSTOMER]!! I’ll answer *properly* — then add a sweet [DEAL]!!")
 
 def handle_text(update, ctx):
     bot_username = ctx.bot.username.lower()
     txt = update.message.text or ""
     chat_type = update.message.chat.type
 
-    # In groups: reply only when mentioned
+    def reply_like_spamton(src: str):
+        clean = spamton_brain(src)
+        styled = spamton_style(clean)
+        update.message.reply_text(styled)
+
     if chat_type in ("group", "supergroup"):
         if f"@{bot_username}" in txt.lower():
-            clean = re.sub(rf"@{re.escape(ctx.bot.username)}", "", txt, flags=re.IGNORECASE).strip()
-            if not clean:
-                clean = "HELLO"
-            update.message.reply_text(spamtonify(clean))
+            # strip the mention so the brain sees a clean user question
+            clean_in = re.sub(rf"@{re.escape(ctx.bot.username)}", "", txt, flags=re.IGNORECASE).strip()
+            reply_like_spamton(clean_in or "HELLO")
         else:
             return  # stay quiet if not mentioned
-
-    # In private chat: reply to everything
     else:
-        update.message.reply_text(spamtonify(txt))
+        # private chat: answer everything
+        reply_like_spamton(txt)
 
 def main():
     token = os.getenv("BOT_TOKEN")
