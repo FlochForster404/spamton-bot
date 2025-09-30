@@ -78,19 +78,18 @@ SYSTEM_PROMPT = (
 )
 
 def spamton_brain(user_text: str) -> str:
-    # Responses API: generate clean content; we'll style it ourselves.
-    # See docs recommending Responses API over older Chat Completions. 
-    resp = _client.responses.create(
-        model="gpt-5-mini",  # fast & cheap; you can swap to another supported model
-        input=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_text}
-        ],
-        max_output_tokens=180,
-        temperature=0.7,
-    )
-    # Python SDK exposes a convenience: output_text holds the concatenated text.
-    return resp.output_text or "I cannot compute that [DEAL] right now."
+    try:
+        resp = _client.responses.create(
+            model="gpt-4.1-mini",   # you can swap to gpt-4o-mini or gpt-5-mini if enabled
+            input=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_text}
+            ],
+            max_output_tokens=180
+        )
+        return resp.output_text or "I cannot compute that [DEAL] right now."
+    except Exception as e:
+        return f"[ERROR] {e}"
 
 # =================== TELEGRAM HANDLERS ===================
 def start_cmd(update, ctx):
