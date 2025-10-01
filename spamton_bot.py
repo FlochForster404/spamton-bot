@@ -1,190 +1,150 @@
-from telegram.ext import Updater, MessageHandler, Filters, CommandHandler
 import os, random, re
+import tweepy
+import openai
+from collections import defaultdict
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 
-# ------------------- TUNING KNOBS -------------------
-GLITCH_PROB = 0.12        # % of words to glitch in the final reply (light seasoning)
-CAPS_INTENSITY = 0.55     # random caps strength
-BURST_PROB = 0.15         # chance a glitch becomes a 2-item burst
-# ----------------------------------------------------
-
-# ==== Spamton-style word banks for post-processing ====
-ADJECTIVES = ["BIG","LIMITED","FREE","HOT","VALUE","GUARANTEED","MEGA","ULTIMATE","SECRET","TRUSTED"]
-NOUNS      = ["DEAL","CUSTOMER","OFFER","SALE","MONEY","BONUS","DISCOUNT","JACKPOT","SAVINGS","COUPON","ACCESS"]
-TECH       = ["HYPERLINK BLOCKED","404 ERROR","SYSTEM32","ACCESS DENIED","FILE NOT FOUND","BLUE SCREEN","LOGIN FAILED"]
-MEMES      = ["CONGRATULATIONS WINNER!","WE ARE SO BACK","COOKED","BASED","YOU CALLED??","MONEY MONEY MONEY","NO REFUNDS","LOW PRICE","ACT FAST"]
-
-SUFFIXES   = [
-    "!!!",
-    "??!?!!",
-    "!! Do YoU WaNNa Be A [BIG SHOT]??",
-    "!!?? (pLeAse... bUy sOmEtHinG...)",
-    "!! [LIMITED TIME OFFER]",
-]
-
+# ================== CONFIG ==================
 CA_ADDRESS = "H4gU4QfQ7kgfAjEJz1X9UjHJzdwc7h6t7LaGgrXYpump"
 
-# ------------------- STYLING HELPERS -------------------
-def random_caps(s, p=CAPS_INTENSITY):
-    out = []
-    for c in s:
-        if c.isalpha():
-            out.append(c.upper() if random.random() < p else c.lower())
-        else:
-            out.append(c)
-    return "".join(out)
+GLITCH_PROB = 0.15
+CAPS_INTENSITY = 0.55
+BURST_PROB = 0.18
+SUFFIXES = ["[BIG SHOT]", "[CUSTOMER]", "[DEAL]", "[NO REFUNDS]", "[FREE MONEY]"]
+
+# OpenAI client
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+# ================ SPAMTON STYLE ================
+def random_caps(word, intensity=0.5):
+    return "".join(c.upper() if random.random() < intensity else c.lower() for c in word)
 
 def generate_glitch():
-    # 45%: two-part combo like [BIG DEAL]; 55%: single token
-    if random.random() < 0.45:
-        parts = [random.choice(ADJECTIVES), random.choice(NOUNS)]
-        if random.random() < 0.30:
-            parts.append(random.choice(TECH + MEMES))
-        phrase = " ".join(parts)
-    else:
-        phrase = random.choice(random.choice([ADJECTIVES, NOUNS, TECH, MEMES]))
-    return f"[{phrase}]"
+    return random.choice(["[FREE]", "[HYPERLINK BLOCKED]", "[BIG SHOT]", "[SPAMTON]"])
 
-def maybe_glitch_token():
-    # 1 or 2 glitches (burst rarer so reply stays readable)
-    if random.random() < BURST_PROB:
-        return generate_glitch() + " " + generate_glitch()
-    return generate_glitch()
-
-def spamton_style(text: str) -> str:
-    """Take a clean model reply and add Spamton flavor (caps + bracket glitches)."""
+def style_with_protected_ca(text: str) -> str:
     tokens = text.split()
     out = []
     for w in tokens:
-        if random.random() < GLITCH_PROB and len(w) > 2:
-            out.append(maybe_glitch_token())
+        if w == CA_ADDRESS:
+            out.append(w)
         else:
-            # 12%: bracketize the original word, else random-caps
-            if random.random() < 0.12:
-                core = re.sub(r"^\W+|\W+$", "", w).upper()
-                w = w.replace(core, f"[{core}]") if core else w
-            out.append(random_caps(w))
-    # Add a dramatic suffix sometimes
+            if random.random() < GLITCH_PROB and len(w) > 2:
+                if random.random() < BURST_PROB:
+                    out.append(generate_glitch() + " " + generate_glitch())
+                else:
+                    out.append(generate_glitch())
+            else:
+                out.append(random_caps(w, CAPS_INTENSITY))
     if random.random() < 0.6:
         out.append(random_caps(random.choice(SUFFIXES), 0.65))
     return " ".join(out)
 
-# ------------------- AI BRAIN (OpenAI) -------------------
-from openai import OpenAI
-_client = OpenAI()  # reads OPENAI_API_KEY from env
+# ================ SHILL / SENTIMENT ================
+def generate_shill():
+    intros = ["YoU [CUSTOMER]!!", "ATTENTION!!", "Do YoU WaNNa Be A [BIG SHOT]??"]
+    bodies = ["ThIs ToKeN iS ThE [FUTURE] oF [SOLANA]!!", "We ArE [SO BACK]!!"]
+    closers = [f"Here’s ThE [CA]: {CA_ADDRESS}", f"BuY wItH ThIs [CA]: {CA_ADDRESS}"]
+    return f"{random.choice(intros)} {random.choice(bodies)} {random.choice(closers)}"
 
-SYSTEM_PROMPT = (
-    "You are Spamton from Deltarune. Answer the user's message helpfully and directly, "
-    "but in Spamton's persona: pushy late-night infomercial salesman, desperate, a bit glitchy. "
-    "Keep answers short (1–3 sentences). Do NOT overuse brackets; the app will add style later."
-)
+def generate_bullish():
+    return f"mArKeT sEnTiMeNt: [BULLISH]!! ReAdY fOr [BIG SHOT] MoVeS!! CA: {CA_ADDRESS}"
 
-def fallback_rule_based(user_text: str) -> str:
-    """If OpenAI fails, give a simple intent-based reply."""
-    t = user_text.lower()
-    if any(k in t for k in ["hi","hello","hey","morning","yo","sup"]):
-        return "Hello there, valued customer! Ready for a deal?"
-    if any(k in t for k in ["price","cost","how much","fee"]):
-        return "It costs a tiny price for a GIANT value—trust me."
-    if any(k in t for k in ["help","can you","assist"]):
-        return "Tell me the problem—I'll fix it AND upsell you something nice."
-    if any(k in t for k in ["bye","goodnight","see you"]):
-        return "Goodbye! Don’t forget to grab today’s special before it’s gone."
-    return "Great question! Here’s the best answer I can give you right now."
+def generate_coping():
+    return f"rEd CaNdLeS = [DISCOUNT]!! KeEp tHe [FAITH]!! CA: {CA_ADDRESS}"
 
-def spamton_brain(user_text: str) -> str:
-    # Use Responses API; no 'temperature' parameter here
+# ================ TWITTER / X INTEGRATION ================
+TW_API_KEY        = os.getenv("TWITTER_API_KEY")
+TW_API_SECRET     = os.getenv("TWITTER_API_SECRET")
+TW_ACCESS_TOKEN   = os.getenv("TWITTER_ACCESS_TOKEN")
+TW_ACCESS_SECRET  = os.getenv("TWITTER_ACCESS_SECRET")
+
+twitter_api = None
+if all([TW_API_KEY, TW_API_SECRET, TW_ACCESS_TOKEN, TW_ACCESS_SECRET]):
     try:
-        resp = _client.responses.create(
-            model="gpt-4o-mini",  # pick a fast model enabled on your account
-            input=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": user_text}
-            ],
-            max_output_tokens=180
-        )
-        text = (resp.output_text or "").strip()
-        if not text:
-            text = fallback_rule_based(user_text)
-        return text
-    except Exception:
-        return fallback_rule_based(user_text)
+        auth = tweepy.OAuth1UserHandler(TW_API_KEY, TW_API_SECRET, TW_ACCESS_TOKEN, TW_ACCESS_SECRET)
+        twitter_api = tweepy.API(auth)
+        print("Twitter client ready.")
+    except Exception as e:
+        print("Twitter init error:", e)
 
-# ------------------- TELEGRAM HANDLERS -------------------
+_last_tweet = ""
+
+def to_twitter_text(msg: str) -> str:
+    clean = msg.replace("[","").replace("]","")
+    return clean[:277] + "..." if len(clean) > 280 else clean
+
+def tweet_random():
+    global _last_tweet
+    msg = generate_shill() if random.random()<0.5 else (generate_bullish() if random.random()<0.5 else generate_coping())
+    tweet = to_twitter_text(msg)
+    if tweet != _last_tweet:
+        try:
+            twitter_api.update_status(status=tweet)
+            _last_tweet = tweet
+            print("Tweeted:", tweet)
+        except Exception as e:
+            print("Twitter error:", e)
+
+# ================ OPENAI SMART REPLIES ================
+def spamton_brain(prompt: str) -> str:
+    """Ask OpenAI to generate a Spamton-style reply"""
+    try:
+        resp = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role":"system","content":f"You are Spamton from Deltarune. Reply in glitchy spamton-style. Always mention {CA_ADDRESS} if asked about CA."},
+                {"role":"user","content":prompt}
+            ],
+            temperature=0.9,
+            max_tokens=120
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        print("OpenAI error:", e)
+        return style_with_protected_ca("ERROR [CUSTOMER]! No [DEAL] right now!")
+
+# ================ TELEGRAM HANDLERS ================
 def start_cmd(update, ctx):
-    update.message.reply_text(
-        "MENTION ME IN GROUPS, [CUSTOMER]!! I’ll answer *properly* — then add a sweet [DEAL]!!"
-    )
+    update.message.reply_text("Spamton here! Type /ca or mention me for [BIG SHOT] deals!!")
 
 def ca_cmd(update, ctx):
-    # Always works (even with privacy ON) because it's a /command
-    base = f"Here is the CA: {CA_ADDRESS}"
-    tokens, out = base.split(), []
-    for tok in tokens:
-        if tok == CA_ADDRESS:
-            out.append(tok)  # keep CA EXACTLY as-is
-        else:
-            if random.random() < GLITCH_PROB:
-                out.append(maybe_glitch_token())
-            else:
-                out.append(random_caps(tok, CAPS_INTENSITY))
-    styled = " ".join(out) + " " + random_caps(random.choice(SUFFIXES), 0.65)
-    update.message.reply_text(styled)
+    update.message.reply_text(style_with_protected_ca(f"Here is the CA: {CA_ADDRESS}"))
+
+def tweetnow_cmd(update, ctx):
+    tweet_random()
+    update.message.reply_text("Tweet sent!")
 
 def handle_text(update, ctx):
-    bot_username = ctx.bot.username.lower()
     txt = update.message.text or ""
     chat_type = update.message.chat.type
+    bot_username = ctx.bot.username.lower()
 
-    # Helper to send a brainy + styled reply
-    def reply_like_spamton(src: str):
-        clean = spamton_brain(src)
-        styled = spamton_style(clean)
-        update.message.reply_text(styled)
+    if "ca" in txt.lower():
+        update.message.reply_text(style_with_protected_ca(f"Here is the CA: {CA_ADDRESS}"))
+        return
 
-    # -------- SPECIAL CA OVERRIDE --------
-    # If message contains "ca" (any case), return the CA styled,
-    # keeping the CA string clean and unmodified.
-    def send_ca_response():
-        base = f"Here is the CA: {CA_ADDRESS}"
-        tokens, out = base.split(), []
-        for tok in tokens:
-            if tok == CA_ADDRESS:
-                out.append(tok)
-            else:
-                if random.random() < GLITCH_PROB:
-                    out.append(maybe_glitch_token())
-                else:
-                    out.append(random_caps(tok, CAPS_INTENSITY))
-        styled = " ".join(out) + " " + random_caps(random.choice(SUFFIXES), 0.65)
-        update.message.reply_text(styled)
+    if chat_type in ("group","supergroup") and f"@{bot_username}" not in txt.lower():
+        return
 
-    if chat_type in ("group", "supergroup"):
-        # Only react when mentioned
-        if f"@{bot_username}" not in txt.lower():
-            return
-        # Strip the mention so the AI sees a clean question
-        clean_in = re.sub(rf"@{re.escape(ctx.bot.username)}", "", txt, flags=re.IGNORECASE).strip()
-        # CA check on the cleaned text
-        if "ca" in clean_in.lower():
-            send_ca_response()
-            return
-        reply_like_spamton(clean_in or "HELLO")
-    else:
-        # Private chat: answer everything
-        if "ca" in txt.lower():
-            send_ca_response()
-            return
-        reply_like_spamton(txt)
+    reply = spamton_brain(txt)
+    update.message.reply_text(reply)
 
+# ================ MAIN =================
 def main():
-    token = os.getenv("BOT_TOKEN")
-    if not token:
-        raise RuntimeError("BOT_TOKEN env var missing")
-    updater = Updater(token, use_context=True)
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
+    job_queue = updater.job_queue
+
     dp.add_handler(CommandHandler("start", start_cmd))
-    dp.add_handler(CommandHandler("ca", ca_cmd))  # /ca always works in groups & DMs
+    dp.add_handler(CommandHandler("ca", ca_cmd))
+    dp.add_handler(CommandHandler("tweetnow", tweetnow_cmd))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
+
+    if twitter_api:
+        job_queue.run_once(lambda ctx: tweet_random(), when=random.randint(600,1200))
+
     updater.start_polling()
     updater.idle()
 
